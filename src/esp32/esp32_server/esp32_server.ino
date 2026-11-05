@@ -126,6 +126,8 @@ void atualizarDisplay() {
   else           { display.println(F("FALHA")); }
 
   display.print(F("IP: ")); display.println(WiFi.localIP());
+  display.print(F("Wi-Fi: "));
+  display.println(WiFi.status() == WL_CONNECTED ? F("OK") : F("OFF"));
   display.display();
 }
 
@@ -143,7 +145,21 @@ String montarCard(const char* titulo, float temp, bool ok, const char* classeTem
   return card;
 }
 
+// Card com os dados de rede: SSID, IP, MAC e status da conexão
+String montarCardRede(bool conectado) {
+  String card = "<div class='card rede'><h3>Conex&atilde;o</h3>";
+  card += "<p><b>Rede:</b> " + WiFi.SSID() + "</p>";
+  card += "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>";
+  card += "<p><b>MAC:</b> " + WiFi.macAddress() + "</p>";
+  card += "<p><b>Status:</b> ";
+  card += conectado ? "<span class='ok'>&#9679; Conectado</span>" : "<span class='erro'>&#9679; Desconectado</span>";
+  card += "</p></div>";
+  return card;
+}
+
 void handleRoot() {
+  bool conectado = (WiFi.status() == WL_CONNECTED);
+
   // Montagem da página HTML profissional COM AUTO-REFRESH
   String html = "<html lang='pt-BR'><head><meta charset='UTF-8'>";
 
@@ -157,13 +173,21 @@ void handleRoot() {
   html += ".card{background:#fff;border-radius:12px;box-shadow:0 4px 8px rgba(0,0,0,0.1);padding:25px;width:240px;border-bottom: 5px solid #28a745;}";
   html += ".temp{font-size:3em;font-weight:bold;color:#007bff;margin:15px 0;}";
   html += ".temp-ext{color:#f39c12;}";
-  html += ".badge{background:#17a2b8;color:white;padding:5px 10px;border-radius:20px;font-size:0.8em;}</style></head><body>";
+  html += ".badge{color:white;padding:5px 10px;border-radius:20px;font-size:0.8em;}";
+  html += ".badge-ok{background:#28a745;} .badge-erro{background:#dc3545;}";
+  html += ".rede{border-bottom:5px solid #17a2b8;text-align:left;} .rede p{margin:8px 0;}";
+  html += ".ok{color:#28a745;font-weight:bold;} .erro{color:#dc3545;font-weight:bold;}</style></head><body>";
 
-  html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado <span class='badge'>ONLINE</span></p></div>";
+  // Selo de status baseado no estado real do Wi-Fi
+  String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
+                          : "<span class='badge badge-erro'>DESCONECTADO</span>";
+  html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p></div>";
   html += "<div class='container'>";
 
   html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1");
   html += montarCard("Temp. Externa", tempExterna, externaOk, "temp-ext", "Sensor DS18B20 #2");
+
+  html += montarCardRede(conectado);
 
   html += "</div></body></html>";
 
