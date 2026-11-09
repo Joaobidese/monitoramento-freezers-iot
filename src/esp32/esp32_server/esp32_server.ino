@@ -5,6 +5,7 @@
 #include <Adafruit_SSD1306.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <LittleFS.h>
 
 // Credenciais da rede Wi-Fi
 const char* ssid = "Wifi";
@@ -44,6 +45,17 @@ float tempExterna = 0.0;
 bool internaOk = false;   // false = sensor desconectado ou com falha
 bool externaOk = false;
 
+// Limite de temperatura do freezer: acima disso é alerta
+const float LIMITE_TEMPERATURA = -10.0;
+bool alertaInterna = false;  // true = temperatura está acima do limite
+bool alertaExterna = false;
+
+// Log persistente na flash (LittleFS)
+const char* ARQUIVO_LOG = "/log.txt";
+const char* ARQUIVO_LOG_ANTIGO = "/log_antigo.txt";
+const size_t LIMITE_LOG_BYTES = 16 * 1024;  // acima de 16 KB o log é rotacionado
+bool logDisponivel = false;                 // false = LittleFS não montou
+
 // Temperaturas mínima e máxima desde que o sistema ligou (ficam na RAM)
 float minInterna = 0.0, maxInterna = 0.0;
 float minExterna = 0.0, maxExterna = 0.0;
@@ -80,6 +92,61 @@ bool lerSensor(const DeviceAddress endereco, float &temperatura) {
   }
   temperatura = valor;
   return true;
+}
+
+// Horário do registro: tempo desde que o sistema ligou (+hh:mm:ss)
+String dataHora() {
+  unsigned long s = millis() / 1000;
+  char texto[16];
+  snprintf(texto, sizeof(texto), "+%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
+  return String(texto);
+}
+
+// Grava uma linha no log (Serial + arquivo na flash). nivel: INFO, AVISO ou ERRO
+void registrarLog(const char* nivel, const String &mensagem) {
+  String linha = "[" + dataHora() + "] " + nivel + " " + mensagem;
+  Serial.println(linha);
+  if (!logDisponivel) return;
+
+  // Arquivo passou do limite: vira o log antigo (o antigo anterior é apagado)
+  if (LittleFS.exists(ARQUIVO_LOG)) {
+    File atual = LittleFS.open(ARQUIVO_LOG, FILE_READ);
+    size_t tamanho = atual.size();
+    atual.close();
+    if (tamanho > LIMITE_LOG_BYTES) {
+      LittleFS.remove(ARQUIVO_LOG_ANTIGO);
+      LittleFS.rename(ARQUIVO_LOG, ARQUIVO_LOG_ANTIGO);
+    }
+  }
+
+  // FILE_APPEND: escreve no final do arquivo, sem apagar o que já existe
+  File arquivo = LittleFS.open(ARQUIVO_LOG, FILE_APPEND);
+  if (arquivo) {
+    arquivo.println(linha);
+    arquivo.close();
+  }
+}
+
+// Lê um arquivo inteiro da flash ("" se não existir)
+String lerArquivo(const char* caminho) {
+  if (!LittleFS.exists(caminho)) return "";
+  File arquivo = LittleFS.open(caminho, FILE_READ);
+  String conteudo = arquivo.readString();
+  arquivo.close();
+  return conteudo;
+}
+
+// Registra quando a temperatura passa do limite ou volta ao normal
+void verificarLimite(const char* nome, bool ok, float temp, bool &emAlerta) {
+  if (!ok) return;  // sem leitura válida não há o que comparar
+  bool acima = temp > LIMITE_TEMPERATURA;
+  if (acima && !emAlerta) {
+    registrarLog("AVISO", "Temp. " + String(nome) + " acima do limite: " + String(temp, 1) + " C");
+  }
+  if (!acima && emAlerta) {
+    registrarLog("INFO", "Temp. " + String(nome) + " normalizada: " + String(temp, 1) + " C");
+  }
+  emAlerta = acima;
 }
 
 // Atualiza o mínimo e o máximo com uma nova leitura válida
@@ -120,13 +187,18 @@ void atualizarSensores() {
     if (internaOk) atualizarMinMax(tempInterna, minInterna, maxInterna, temRegistroInterna);
     if (externaOk) atualizarMinMax(tempExterna, minExterna, maxExterna, temRegistroExterna);
 
-    // Informa no Serial apenas quando o estado do sensor muda
+    // Registra no log apenas quando o estado do sensor muda
     if (estavaOkInterna != internaOk) {
-      Serial.println(internaOk ? "Sensor interno OK" : "FALHA no sensor interno");
+      if (internaOk) registrarLog("INFO", "Sensor interno OK");
+      else           registrarLog("ERRO", "Falha no sensor interno (sem leitura)");
     }
     if (estavaOkExterna != externaOk) {
-      Serial.println(externaOk ? "Sensor externo OK" : "FALHA no sensor externo");
+      if (externaOk) registrarLog("INFO", "Sensor externo OK");
+      else           registrarLog("ERRO", "Falha no sensor externo (sem leitura)");
     }
+
+    verificarLimite("interna", internaOk, tempInterna, alertaInterna);
+    verificarLimite("externa", externaOk, tempExterna, alertaExterna);
 
     atualizarDisplay();
   }
@@ -157,7 +229,7 @@ void atualizarDisplay() {
 // Card de temperatura: borda vermelha acima de -10 °C ou em falha
 String montarCard(const char* titulo, float temp, bool ok, const char* classeTemp, const char* legenda,
                   float minimo, float maximo, bool temRegistro) {
-  bool alerta = !ok || temp > -10.0;
+  bool alerta = !ok || temp > LIMITE_TEMPERATURA;
   String borda = alerta ? "border-bottom: 5px solid #dc3545;" : "border-bottom: 5px solid #28a745;";
   String valor;
   if (ok) valor = String(temp, 1) + " &deg;C";
@@ -215,7 +287,8 @@ void handleRoot() {
   // Selo de status baseado no estado real do Wi-Fi
   String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
                           : "<span class='badge badge-erro'>DESCONECTADO</span>";
-  html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p></div>";
+  html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
+  html += "<p><a href='/log'>Ver log do sistema</a></p></div>";
   html += "<div class='container'>";
 
   html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1",
@@ -230,8 +303,28 @@ void handleRoot() {
   server.send(200, "text/html", html);
 }
 
+// Rota /log: mostra o log gravado na flash (antigo + atual)
+void handleLog() {
+  String html = "<html lang='pt-BR'><head><meta charset='UTF-8'><title>Log do Sistema</title>";
+  html += "<style>body{font-family:'Segoe UI', Tahoma, sans-serif;background:#eef2f5;margin:0;padding:30px;}";
+  html += "pre{background:#fff;border-radius:8px;padding:15px;box-shadow:0 2px 6px rgba(0,0,0,0.1);white-space:pre-wrap;}</style></head><body>";
+  html += "<h2>Log do Sistema</h2><p><a href='/'>&larr; Voltar ao painel</a></p>";
+  if (!logDisponivel) {
+    html += "<p>Sistema de arquivos indispon&iacute;vel.</p>";
+  }
+  html += "<pre>" + lerArquivo(ARQUIVO_LOG_ANTIGO) + lerArquivo(ARQUIVO_LOG) + "</pre></body></html>";
+  server.send(200, "text/html", html);
+}
+
 void setup() {
   Serial.begin(115200);
+
+  // Monta o sistema de arquivos da flash (true = formata na primeira vez)
+  logDisponivel = LittleFS.begin(true);
+  if (!logDisponivel) {
+    registrarLog("ERRO", "Falha ao montar o LittleFS: log so no Serial");
+  }
+  registrarLog("INFO", "Sistema iniciado");
 
   // Garante que o buzzer inicie e permaneça desligado
   pinMode(buzzerPin, OUTPUT);
@@ -242,8 +335,10 @@ void setup() {
   sensors.setWaitForConversion(false);  // requestTemperatures() não bloqueia
 
   int quantidade = sensors.getDeviceCount();
-  Serial.print("Sensores encontrados: ");
-  Serial.println(quantidade);
+  registrarLog("INFO", "Sensores encontrados: " + String(quantidade));
+  if (quantidade < 2) {
+    registrarLog("AVISO", "Esperados 2 sensores, encontrados " + String(quantidade));
+  }
 
   // Lista o endereço de cada sensor encontrado
   for (int i = 0; i < quantidade; i++) {
@@ -266,7 +361,7 @@ void setup() {
   // Inicializa I2C e Display OLED
   Wire.begin(21, 22);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("Falha ao iniciar o OLED"));
+    registrarLog("ERRO", "Falha ao iniciar o display OLED");
   }
 
   // Conecta ao Wi-Fi
@@ -276,11 +371,11 @@ void setup() {
     Serial.print(".");
   }
 
-  Serial.println("\nWi-Fi Conectado!");
-  Serial.print("IP do ESP32: ");
-  Serial.println(WiFi.localIP());
+  Serial.println();
+  registrarLog("INFO", "Wi-Fi conectado. IP " + WiFi.localIP().toString());
 
   server.on("/", handleRoot);
+  server.on("/log", handleLog);
   server.begin();
 
   // Primeira leitura imediata
