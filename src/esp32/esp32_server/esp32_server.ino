@@ -21,7 +21,11 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Pinos dos Sensores e do Buzzer
 const int oneWireBus = 4;  // Ambos os sensores DS18B20 no pino 4
-const int buzzerPin = 23;  // Buzzer no pino 23
+const int buzzerPin = 23;  // Buzzer (atuador) no pino 23
+
+// Estado do atuador: começa desligado
+bool atuadorLigado = false;
+const int FREQUENCIA_BUZZER = 2000;  // Hz (som do buzzer)
 
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
@@ -63,6 +67,7 @@ bool temRegistroInterna = false;  // false = ainda não houve leitura válida
 bool temRegistroExterna = false;
 
 void atualizarDisplay();
+String montarCardAtuador();
 
 // Verifica se um endereço ainda está zerado (não preenchido)
 bool enderecoVazio(const DeviceAddress endereco) {
@@ -149,6 +154,19 @@ void verificarLimite(const char* nome, bool ok, float temp, bool &emAlerta) {
   emAlerta = acima;
 }
 
+// Liga ou desliga o buzzer e registra o comando no log
+// tone() gera um sinal de 2000 Hz: funciona com buzzer ativo e passivo
+void definirAtuador(bool ligar) {
+  atuadorLigado = ligar;
+  if (ligar) {
+    tone(buzzerPin, FREQUENCIA_BUZZER);
+  } else {
+    noTone(buzzerPin);
+    digitalWrite(buzzerPin, LOW);
+  }
+  registrarLog("INFO", ligar ? "Atuador LIGADO via rede" : "Atuador DESLIGADO via rede");
+}
+
 // Atualiza o mínimo e o máximo com uma nova leitura válida
 void atualizarMinMax(float temp, float &minimo, float &maximo, bool &temRegistro) {
   if (!temRegistro) {
@@ -223,6 +241,8 @@ void atualizarDisplay() {
   display.print(F("IP: ")); display.println(WiFi.localIP());
   display.print(F("Wi-Fi: "));
   display.println(WiFi.status() == WL_CONNECTED ? F("OK") : F("OFF"));
+  display.print(F("Buzzer: "));
+  display.println(atuadorLigado ? F("ON") : F("OFF"));
   display.display();
 }
 
@@ -282,7 +302,10 @@ void handleRoot() {
   html += ".badge{color:white;padding:5px 10px;border-radius:20px;font-size:0.8em;}";
   html += ".badge-ok{background:#28a745;} .badge-erro{background:#dc3545;}";
   html += ".rede{border-bottom:5px solid #17a2b8;text-align:left;} .rede p{margin:8px 0;}";
-  html += ".ok{color:#28a745;font-weight:bold;} .erro{color:#dc3545;font-weight:bold;}</style></head><body>";
+  html += ".ok{color:#28a745;font-weight:bold;} .erro{color:#dc3545;font-weight:bold;}";
+  html += ".atuador{border-bottom:5px solid #6f42c1;}";
+  html += ".botao{display:inline-block;margin:6px;padding:10px 18px;border-radius:8px;color:#fff;text-decoration:none;font-weight:bold;}";
+  html += ".ligar{background:#28a745;} .desligar{background:#dc3545;}</style></head><body>";
 
   // Selo de status baseado no estado real do Wi-Fi
   String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
@@ -297,10 +320,44 @@ void handleRoot() {
                      minExterna, maxExterna, temRegistroExterna);
 
   html += montarCardRede(conectado);
+  html += montarCardAtuador();
 
   html += "</div></body></html>";
 
   server.send(200, "text/html", html);
+}
+
+// Card do atuador: estado atual e botões que chamam a rota /atuador
+String montarCardAtuador() {
+  String card = "<div class='card atuador'><h3>Atuador (Buzzer)</h3>";
+  card += "<p><b>Estado:</b> ";
+  if (atuadorLigado) card += "<span class='erro'>&#9679; LIGADO</span>";
+  else               card += "<span class='ok'>&#9679; DESLIGADO</span>";
+  card += "</p>";
+  card += "<a class='botao ligar' href='/atuador?estado=on'>Ligar</a>";
+  card += "<a class='botao desligar' href='/atuador?estado=off'>Desligar</a>";
+  card += "</div>";
+  return card;
+}
+
+// Rota /atuador?estado=on|off: recebe o comando pela rede
+void handleAtuador() {
+  String estado = server.arg("estado");  // valor depois de "estado=" na URL
+
+  if (estado == "on") {
+    definirAtuador(true);
+  } else if (estado == "off") {
+    definirAtuador(false);
+  } else {
+    // Comando inválido: responde erro 400 e não muda nada
+    registrarLog("AVISO", "Comando invalido em /atuador: '" + estado + "'");
+    server.send(400, "text/plain", "Comando invalido. Use /atuador?estado=on ou /atuador?estado=off");
+    return;
+  }
+
+  // Volta para o painel (303 = redirecionamento); o texto aparece em testes com curl
+  server.sendHeader("Location", "/");
+  server.send(303, "text/plain", atuadorLigado ? "Atuador LIGADO" : "Atuador DESLIGADO");
 }
 
 // Rota /log: mostra o log gravado na flash (antigo + atual)
@@ -376,6 +433,7 @@ void setup() {
 
   server.on("/", handleRoot);
   server.on("/log", handleLog);
+  server.on("/atuador", handleAtuador);
   server.begin();
 
   // Primeira leitura imediata
