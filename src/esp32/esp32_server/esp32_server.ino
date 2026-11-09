@@ -44,6 +44,12 @@ float tempExterna = 0.0;
 bool internaOk = false;   // false = sensor desconectado ou com falha
 bool externaOk = false;
 
+// Temperaturas mínima e máxima desde que o sistema ligou (ficam na RAM)
+float minInterna = 0.0, maxInterna = 0.0;
+float minExterna = 0.0, maxExterna = 0.0;
+bool temRegistroInterna = false;  // false = ainda não houve leitura válida
+bool temRegistroExterna = false;
+
 void atualizarDisplay();
 
 // Verifica se um endereço ainda está zerado (não preenchido)
@@ -76,6 +82,19 @@ bool lerSensor(const DeviceAddress endereco, float &temperatura) {
   return true;
 }
 
+// Atualiza o mínimo e o máximo com uma nova leitura válida
+void atualizarMinMax(float temp, float &minimo, float &maximo, bool &temRegistro) {
+  if (!temRegistro) {
+    // Primeira leitura válida: vira o mínimo e o máximo
+    minimo = temp;
+    maximo = temp;
+    temRegistro = true;
+    return;
+  }
+  if (temp < minimo) minimo = temp;
+  if (temp > maximo) maximo = temp;
+}
+
 // Pede a medição e, após o tempo de conversão, busca o resultado
 void atualizarSensores() {
   unsigned long agora = millis();
@@ -96,6 +115,10 @@ void atualizarSensores() {
 
     internaOk = lerSensor(enderecoInterno, tempInterna);
     externaOk = lerSensor(enderecoExterno, tempExterna);
+
+    // Leituras com falha não entram no mínimo e no máximo
+    if (internaOk) atualizarMinMax(tempInterna, minInterna, maxInterna, temRegistroInterna);
+    if (externaOk) atualizarMinMax(tempExterna, minExterna, maxExterna, temRegistroExterna);
 
     // Informa no Serial apenas quando o estado do sensor muda
     if (estavaOkInterna != internaOk) {
@@ -132,7 +155,8 @@ void atualizarDisplay() {
 }
 
 // Card de temperatura: borda vermelha acima de -10 °C ou em falha
-String montarCard(const char* titulo, float temp, bool ok, const char* classeTemp, const char* legenda) {
+String montarCard(const char* titulo, float temp, bool ok, const char* classeTemp, const char* legenda,
+                  float minimo, float maximo, bool temRegistro) {
   bool alerta = !ok || temp > -10.0;
   String borda = alerta ? "border-bottom: 5px solid #dc3545;" : "border-bottom: 5px solid #28a745;";
   String valor;
@@ -141,6 +165,15 @@ String montarCard(const char* titulo, float temp, bool ok, const char* classeTem
 
   String card = "<div class='card' style='" + borda + "'><h3>" + titulo + "</h3>";
   card += "<div class='temp " + String(classeTemp) + "'>" + valor + "</div>";
+  // Mínimo e máximo registrados ("--" se ainda não houver leitura válida)
+  String textoMin = "--";
+  String textoMax = "--";
+  if (temRegistro) {
+    textoMin = String(minimo, 1) + " &deg;C";
+    textoMax = String(maximo, 1) + " &deg;C";
+  }
+  card += "<p class='minmax'>M&iacute;n: <b>" + textoMin + "</b> | M&aacute;x: <b>" + textoMax + "</b></p>";
+
   card += "<p>" + String(legenda) + "</p></div>";
   return card;
 }
@@ -173,6 +206,7 @@ void handleRoot() {
   html += ".card{background:#fff;border-radius:12px;box-shadow:0 4px 8px rgba(0,0,0,0.1);padding:25px;width:240px;border-bottom: 5px solid #28a745;}";
   html += ".temp{font-size:3em;font-weight:bold;color:#007bff;margin:15px 0;}";
   html += ".temp-ext{color:#f39c12;}";
+  html += ".minmax{color:#555;font-size:0.95em;}";
   html += ".badge{color:white;padding:5px 10px;border-radius:20px;font-size:0.8em;}";
   html += ".badge-ok{background:#28a745;} .badge-erro{background:#dc3545;}";
   html += ".rede{border-bottom:5px solid #17a2b8;text-align:left;} .rede p{margin:8px 0;}";
@@ -184,8 +218,10 @@ void handleRoot() {
   html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p></div>";
   html += "<div class='container'>";
 
-  html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1");
-  html += montarCard("Temp. Externa", tempExterna, externaOk, "temp-ext", "Sensor DS18B20 #2");
+  html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1",
+                     minInterna, maxInterna, temRegistroInterna);
+  html += montarCard("Temp. Externa", tempExterna, externaOk, "temp-ext", "Sensor DS18B20 #2",
+                     minExterna, maxExterna, temRegistroExterna);
 
   html += montarCardRede(conectado);
 
