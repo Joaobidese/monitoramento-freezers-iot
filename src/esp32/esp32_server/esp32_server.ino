@@ -8,9 +8,17 @@
 #include <LittleFS.h>
 #include <time.h>
 
-// Credenciais da rede Wi-Fi
-const char* ssid = "Wifi";
-const char* password = "12345678";
+// Credenciais da rede Wi-Fi: ficam em config.h (fora do Git).
+// Sem config.h, usa o modelo config.example.h e avisa na compilação.
+#if __has_include("config.h")
+#include "config.h"
+#else
+#warning "config.h nao encontrado: usando config.example.h. Copie o modelo para config.h e preencha o Wi-Fi."
+#include "config.example.h"
+#endif
+
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_SENHA;
 
 WebServer server(80);
 

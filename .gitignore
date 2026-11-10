@@ -67,3 +67,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Credenciais locais do ESP32 (use config.example.h como modelo)
+src/esp32/esp32_server/config.h
+
