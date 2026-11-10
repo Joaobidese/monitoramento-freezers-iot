@@ -381,7 +381,7 @@ void handleRoot() {
   String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
                           : "<span class='badge badge-erro'>DESCONECTADO</span>";
   html += "<div class='header'><h1>&#10052;&#65039; Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
-  html += "<p><a href='/log'>Ver log do sistema</a></p></div>";
+  html += "<p><a href='/log'>Ver log do sistema</a> | <a href='/status'>Status (JSON)</a></p></div>";
   html += "<div class='container'>";
 
   html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1",
@@ -441,6 +441,46 @@ void handleLog() {
   }
   html += "<pre>" + lerArquivo(ARQUIVO_LOG_ANTIGO) + lerArquivo(ARQUIVO_LOG) + "</pre></body></html>";
   server.send(200, "text/html", html);
+}
+
+// Número em JSON, ou null quando não há valor válido
+String jsonNumero(bool valido, float valor) {
+  return valido ? String(valor, 2) : String("null");
+}
+
+// Objeto JSON com o estado de um sensor
+String jsonSensor(bool ok, float temp, bool temRegistro, float minimo, float maximo,
+                  int falhas, bool emAlerta) {
+  String json = "{";
+  json += "\"ok\":" + String(ok ? "true" : "false");
+  json += ",\"temperatura\":" + jsonNumero(ok, temp);
+  json += ",\"minima\":" + jsonNumero(temRegistro, minimo);
+  json += ",\"maxima\":" + jsonNumero(temRegistro, maximo);
+  json += ",\"falhas_seguidas\":" + String(falhas);
+  json += ",\"alerta\":" + String(emAlerta ? "true" : "false");
+  json += "}";
+  return json;
+}
+
+// Rota /status: estado completo do sistema em JSON (para testes e integrações)
+void handleStatus() {
+  String json = "{";
+  json += "\"data_hora\":\"" + dataHora() + "\"";
+  json += ",\"uptime_s\":" + String(millis() / 1000);
+  json += ",\"hora_sincronizada\":" + String(horaSincronizada ? "true" : "false");
+  json += ",\"limite_temperatura\":" + String(LIMITE_TEMPERATURA, 1);
+  json += ",\"interna\":" + jsonSensor(internaOk, tempInterna, temRegistroInterna,
+                                       minInterna, maxInterna, falhasInterna, alertaInterna);
+  json += ",\"externa\":" + jsonSensor(externaOk, tempExterna, temRegistroExterna,
+                                       minExterna, maxExterna, falhasExterna, alertaExterna);
+  json += ",\"wifi\":{\"conectado\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+  json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
+  json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
+  json += ",\"rssi\":" + String(WiFi.RSSI()) + "}";
+  json += ",\"atuador_ligado\":" + String(atuadorLigado ? "true" : "false");
+  json += ",\"log_disponivel\":" + String(logDisponivel ? "true" : "false");
+  json += "}";
+  server.send(200, "application/json", json);
 }
 
 void setup() {
@@ -508,6 +548,7 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/log", handleLog);
   server.on("/atuador", handleAtuador);
+  server.on("/status", handleStatus);
   server.begin();
 
   // Primeira leitura imediata
