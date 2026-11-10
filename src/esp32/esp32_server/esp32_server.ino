@@ -7,13 +7,16 @@
 #include <DallasTemperature.h>
 #include <LittleFS.h>
 #include <time.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 
-// Credenciais da rede Wi-Fi: ficam em config.h (fora do Git).
+
+// Wi-Fi e Telegram ficam em config.h (fora do Git, está no .gitignore).
 // Sem config.h, usa o modelo config.example.h e avisa na compilação.
 #if __has_include("config.h")
 #include "config.h"
 #else
-#warning "config.h nao encontrado: usando config.example.h. Copie o modelo para config.h e preencha o Wi-Fi."
+#warning "config.h nao encontrado: usando config.example.h. Copie o modelo para config.h e preencha."
 #include "config.example.h"
 #endif
 
@@ -39,11 +42,10 @@ const int FREQUENCIA_BUZZER = 2000;  // Hz (som do buzzer)
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
 
-// Endereço físico (8 bytes, único de fábrica) de cada DS18B20.
-// Para preencher: veja os endereços no Monitor Serial (115200).
-// Se ficarem zerados, usa a ordem do barramento.
-DeviceAddress enderecoInterno = {0, 0, 0, 0, 0, 0, 0, 0};
-DeviceAddress enderecoExterno = {0, 0, 0, 0, 0, 0, 0, 0};
+// Endereço físico de cada DS18B20, guardado ao ligar (ordem do barramento).
+// Assim, se um sensor desconectar, o outro continua no card certo.
+DeviceAddress enderecoInterno;
+DeviceAddress enderecoExterno;
 
 // Leitura não bloqueante: o tempo é controlado com millis()
 const unsigned long INTERVALO_LEITURA_MS = 2000; // lê a cada 2 s
@@ -58,16 +60,9 @@ float tempExterna = 0.0;
 bool internaOk = false;   // false = sensor desconectado ou com falha
 bool externaOk = false;
 
-// Falha persistente: N leituras seguidas sem resposta (5 x 2 s = ~10 s)
-// separa um ruído isolado no barramento de um sensor realmente com defeito
-const int FALHAS_PARA_ALERTA = 5;
-int falhasInterna = 0;                 // leituras seguidas com falha
-int falhasExterna = 0;
-unsigned long ultimaValidaInterna = 0; // millis() da última leitura válida
-unsigned long ultimaValidaExterna = 0;
-
-// Limite de temperatura do freezer: acima disso é alerta
-const float LIMITE_TEMPERATURA = -10.0;
+// Limite de temperatura: acima disso é alerta e o buzzer liga sozinho.
+// 7 °C para a demonstração com copo de gelo (~2 °C); num freezer real seria -10 °C.
+const float LIMITE_TEMPERATURA = 7.0;
 
 // Data e hora via NTP (horário de Brasília, UTC-3, sem horário de verão)
 const char* FUSO_HORARIO = "<-03>3";
@@ -89,8 +84,7 @@ const unsigned long INTERVALO_RECONEXAO_MS = 10000;  // tenta reconectar a cada 
 bool wifiConectado = false;          // estado na última verificação
 unsigned long inicioQueda = 0;       // quando a conexão caiu
 unsigned long ultimaTentativa = 0;   // última tentativa de reconexão
-bool alertaInterna = false;  // true = temperatura está acima do limite
-bool alertaExterna = false;
+bool alertaInterna = false;  // true = temperatura interna está acima do limite
 
 // Log persistente na flash (LittleFS)
 const char* ARQUIVO_LOG = "/log.txt";
@@ -106,26 +100,8 @@ bool temRegistroExterna = false;
 
 void atualizarDisplay();
 String montarCardAtuador();
-
-// Verifica se um endereço ainda está zerado (não preenchido)
-bool enderecoVazio(const DeviceAddress endereco) {
-  for (int i = 0; i < 8; i++) {
-    if (endereco[i] != 0) return false;
-  }
-  return true;
-}
-
-// Imprime o endereço no formato que pode ser copiado para o código
-void imprimirEndereco(const DeviceAddress endereco) {
-  Serial.print("{");
-  for (int i = 0; i < 8; i++) {
-    Serial.print("0x");
-    if (endereco[i] < 0x10) Serial.print("0");
-    Serial.print(endereco[i], HEX);
-    if (i < 7) Serial.print(", ");
-  }
-  Serial.println("}");
-}
+void definirAtuador(bool ligar, const char* origem);
+void enviarTelegram(const String &mensagem);
 
 // Lê um sensor; retorna false se ele não responder (-127)
 bool lerSensor(const DeviceAddress endereco, float &temperatura) {
@@ -188,22 +164,31 @@ String lerArquivo(const char* caminho) {
   return conteudo;
 }
 
-// Registra quando a temperatura passa do limite ou volta ao normal
+// Quando a temperatura passa do limite: registra AVISO e liga o buzzer.
+// Quando volta ao normal: registra INFO e desliga o buzzer.
+// Só age na mudança de estado; assim, se alguém silenciar pelo painel,
+// o buzzer não volta a tocar até a temperatura normalizar e subir de novo.
 void verificarLimite(const char* nome, bool ok, float temp, bool &emAlerta) {
   if (!ok) return;  // sem leitura válida não há o que comparar
   bool acima = temp > LIMITE_TEMPERATURA;
   if (acima && !emAlerta) {
     registrarLog("AVISO", "Temp. " + String(nome) + " acima do limite: " + String(temp, 1) + " C");
+    definirAtuador(true, "por alerta");
+    enviarTelegram("ALERTA: temperatura " + String(nome) + " em " + String(temp, 1) +
+                   " °C (limite " + String(LIMITE_TEMPERATURA, 0) + " °C). Buzzer ligado.");
   }
   if (!acima && emAlerta) {
     registrarLog("INFO", "Temp. " + String(nome) + " normalizada: " + String(temp, 1) + " C");
+    definirAtuador(false, "por alerta");
+    enviarTelegram("Normalizado: temperatura " + String(nome) + " em " + String(temp, 1) +
+                   " °C. Buzzer desligado.");
   }
   emAlerta = acima;
 }
 
-// Liga ou desliga o buzzer e registra o comando no log
+// Liga ou desliga o buzzer e registra no log. origem: "via rede" ou "por alerta"
 // tone() gera um sinal de 2000 Hz: funciona com buzzer ativo e passivo
-void definirAtuador(bool ligar) {
+void definirAtuador(bool ligar, const char* origem) {
   atuadorLigado = ligar;
   if (ligar) {
     tone(buzzerPin, FREQUENCIA_BUZZER);
@@ -211,7 +196,49 @@ void definirAtuador(bool ligar) {
     noTone(buzzerPin);
     digitalWrite(buzzerPin, LOW);
   }
-  registrarLog("INFO", ligar ? "Atuador LIGADO via rede" : "Atuador DESLIGADO via rede");
+  registrarLog("INFO", String(ligar ? "Atuador LIGADO " : "Atuador DESLIGADO ") + origem);
+}
+
+// Codifica o texto para ir na URL (espaço vira %20, ° vira %C2%B0 etc.)
+String codificarURL(const String &texto) {
+  const char* hex = "0123456789ABCDEF";
+  String resultado;
+  for (unsigned int i = 0; i < texto.length(); i++) {
+    unsigned char c = texto[i];
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+      resultado += (char)c;
+    } else {
+      resultado += '%';
+      resultado += hex[c >> 4];
+      resultado += hex[c & 0x0F];
+    }
+  }
+  return resultado;
+}
+
+// Envia uma mensagem pelo bot do Telegram (requisição HTTPS para a API do Telegram).
+// Aqui o ESP32 atua como CLIENTE HTTP: ele faz o pedido a um servidor da internet.
+void enviarTelegram(const String &mensagem) {
+  if (String(TELEGRAM_CHAT_ID) == "SEU_CHAT_ID") return;  // Telegram não configurado
+  if (WiFi.status() != WL_CONNECTED) {
+    registrarLog("ERRO", "Telegram nao enviado: sem Wi-Fi");
+    return;
+  }
+
+  WiFiClientSecure cliente;
+  cliente.setInsecure();  // HTTPS sem verificar o certificado (simplificação do protótipo)
+
+  HTTPClient http;
+  String url = "https://api.telegram.org/bot" + String(TELEGRAM_TOKEN) +
+               "/sendMessage?chat_id=" + String(TELEGRAM_CHAT_ID) +
+               "&text=" + codificarURL(mensagem);
+  http.begin(cliente, url);
+  http.setTimeout(5000);   // espera no máximo 5 s pela resposta
+  int codigo = http.GET(); // 200 = mensagem entregue ao Telegram
+  http.end();
+
+  if (codigo == 200) registrarLog("INFO", "Alerta enviado ao Telegram");
+  else               registrarLog("ERRO", "Falha ao enviar Telegram (codigo " + String(codigo) + ")");
 }
 
 // Atualiza o mínimo e o máximo com uma nova leitura válida
@@ -225,20 +252,6 @@ void atualizarMinMax(float temp, float &minimo, float &maximo, bool &temRegistro
   }
   if (temp < minimo) minimo = temp;
   if (temp > maximo) maximo = temp;
-}
-
-// Conta leituras seguidas com falha e avisa uma vez quando vira falha persistente
-void acompanharFalhas(const char* nome, bool ok, int &falhas, unsigned long &ultimaValida) {
-  if (ok) {
-    falhas = 0;
-    ultimaValida = millis();
-    return;
-  }
-  falhas++;
-  if (falhas == FALHAS_PARA_ALERTA) {
-    registrarLog("ERRO", "Sensor " + String(nome) + " sem leitura valida ha " +
-                 String(FALHAS_PARA_ALERTA) + " leituras seguidas");
-  }
 }
 
 // Pede a medição e, após o tempo de conversão, busca o resultado
@@ -262,9 +275,6 @@ void atualizarSensores() {
     internaOk = lerSensor(enderecoInterno, tempInterna);
     externaOk = lerSensor(enderecoExterno, tempExterna);
 
-    acompanharFalhas("interno", internaOk, falhasInterna, ultimaValidaInterna);
-    acompanharFalhas("externo", externaOk, falhasExterna, ultimaValidaExterna);
-
     // Leituras com falha não entram no mínimo e no máximo
     if (internaOk) atualizarMinMax(tempInterna, minInterna, maxInterna, temRegistroInterna);
     if (externaOk) atualizarMinMax(tempExterna, minExterna, maxExterna, temRegistroExterna);
@@ -279,8 +289,8 @@ void atualizarSensores() {
       else           registrarLog("ERRO", "Falha no sensor externo (sem leitura)");
     }
 
+    // O limite vale só para o sensor interno (o externo mede o ambiente)
     verificarLimite("interna", internaOk, tempInterna, alertaInterna);
-    verificarLimite("externa", externaOk, tempExterna, alertaExterna);
 
     atualizarDisplay();
   }
@@ -310,17 +320,59 @@ void atualizarDisplay() {
   display.display();
 }
 
-// Card de temperatura: borda vermelha acima de -10 °C ou em falha
-String montarCard(const char* titulo, float temp, bool ok, const char* classeTemp, const char* legenda,
-                  float minimo, float maximo, bool temRegistro, unsigned long ultimaValida) {
-  bool alerta = !ok || temp > LIMITE_TEMPERATURA;
-  String borda = alerta ? "border-bottom: 5px solid #dc3545;" : "border-bottom: 5px solid #28a745;";
-  String valor;
-  if (ok) valor = String(temp, 1) + " &deg;C";
-  else    valor = "FALHA";
+// Estilo comum do painel e da página de log
+const char* ESTILO =
+  "<style>"
+  "body{margin:0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#f4f5f7;color:#1f2328;}"
+  ".topo{background:#fff;border-bottom:1px solid #d8dbe0;padding:14px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}"
+  ".topo h1{font-size:18px;margin:0;font-weight:600;}"
+  ".topo small{color:#656d76;}"
+  ".conteudo{max-width:920px;margin:24px auto;padding:0 16px;}"
+  ".grade{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;}"
+  ".card{background:#fff;border:1px solid #d8dbe0;border-radius:6px;padding:16px 18px;}"
+  ".card h2{font-size:13px;font-weight:600;color:#656d76;margin:0 0 8px;}"
+  ".valor{font-size:38px;font-weight:600;font-variant-numeric:tabular-nums;margin:2px 0 8px;}"
+  ".alerta .valor{color:#c62828;}"
+  ".tag{display:inline-block;font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px;}"
+  ".tag-ok{background:#e6f4ea;color:#1e7b34;}"
+  ".tag-alerta{background:#fdecea;color:#c62828;}"
+  ".tag-neutra{background:#eef0f3;color:#57606a;}"
+  ".detalhe{font-size:14px;color:#57606a;margin:10px 0 0;font-variant-numeric:tabular-nums;}"
+  "table{width:100%;border-collapse:collapse;font-size:14px;}"
+  "td{padding:6px 0;border-bottom:1px solid #eef0f3;}"
+  "td:first-child{color:#656d76;width:70px;}"
+  ".botoes{display:flex;gap:8px;margin-top:12px;}"
+  ".botao{flex:1;text-align:center;padding:8px 0;border:1px solid #d8dbe0;border-radius:6px;text-decoration:none;color:#1f2328;font-weight:600;font-size:14px;background:#fff;}"
+  ".botao:hover{background:#f4f5f7;}"
+  ".ponto{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;}"
+  ".ponto-ok{background:#2e9d4a;} .ponto-erro{background:#c62828;}"
+  "a{color:#0b5cad;}"
+  "pre{background:#fff;border:1px solid #d8dbe0;border-radius:6px;padding:14px;font-size:13px;white-space:pre-wrap;}"
+  "</style>";
 
-  String card = "<div class='card' style='" + borda + "'><h3>" + titulo + "</h3>";
-  card += "<div class='temp " + String(classeTemp) + "'>" + valor + "</div>";
+// Card de temperatura. A etiqueta mostra o estado:
+//   interno: "Normal" (verde) ou "Acima de 7 °C" (vermelho)
+//   externo: "Ambiente" (cinza), pois mede fora do freezer e não usa o limite
+//   falha:   "Falha no sensor" (vermelho), nos dois
+String montarCard(const char* titulo, float temp, bool ok, const char* legenda,
+                  float minimo, float maximo, bool temRegistro, bool usaLimite) {
+  bool acimaDoLimite = ok && usaLimite && temp > LIMITE_TEMPERATURA;
+  bool alerta = !ok || acimaDoLimite;
+
+  String etiqueta;
+  if (!ok)                etiqueta = "<span class='tag tag-alerta'>Falha no sensor</span>";
+  else if (acimaDoLimite) etiqueta = "<span class='tag tag-alerta'>Acima de " + String(LIMITE_TEMPERATURA, 0) + " &deg;C</span>";
+  else if (usaLimite)     etiqueta = "<span class='tag tag-ok'>Normal</span>";
+  else                    etiqueta = "<span class='tag tag-neutra'>Ambiente</span>";
+
+  String valor = "--";
+  if (ok) valor = String(temp, 1) + " &deg;C";
+
+  String card = "<div class='card";
+  if (alerta) card += " alerta";
+  card += "'><h2>" + String(titulo) + "</h2>";
+  card += "<div class='valor'>" + valor + "</div>" + etiqueta;
+
   // Mínimo e máximo registrados ("--" se ainda não houver leitura válida)
   String textoMin = "--";
   String textoMax = "--";
@@ -328,86 +380,63 @@ String montarCard(const char* titulo, float temp, bool ok, const char* classeTem
     textoMin = String(minimo, 1) + " &deg;C";
     textoMax = String(maximo, 1) + " &deg;C";
   }
-  card += "<p class='minmax'>M&iacute;n: <b>" + textoMin + "</b> | M&aacute;x: <b>" + textoMax + "</b></p>";
-
-  // Em falha, mostra há quanto tempo o sensor não responde
-  if (!ok && temRegistro) {
-    unsigned long segundos = (millis() - ultimaValida) / 1000;
-    card += "<p class='erro'>Sem leitura h&aacute; " + String(segundos) + " s</p>";
-  }
-
-  card += "<p>" + String(legenda) + "</p></div>";
+  card += "<p class='detalhe'>M&iacute;n " + textoMin + " &middot; M&aacute;x " + textoMax + "</p>";
+  card += "<p class='detalhe'>" + String(legenda) + "</p></div>";
   return card;
 }
 
 // Card com os dados de rede: SSID, IP, MAC e status da conexão
 String montarCardRede(bool conectado) {
-  String card = "<div class='card rede'><h3>Conex&atilde;o</h3>";
-  card += "<p><b>Rede:</b> " + WiFi.SSID() + "</p>";
-  card += "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>";
-  card += "<p><b>MAC:</b> " + WiFi.macAddress() + "</p>";
-  card += "<p><b>Status:</b> ";
-  card += conectado ? "<span class='ok'>&#9679; Conectado</span>" : "<span class='erro'>&#9679; Desconectado</span>";
-  card += "</p></div>";
+  String card = "<div class='card'><h2>Conex&atilde;o</h2><table>";
+  card += "<tr><td>Rede</td><td>" + WiFi.SSID() + "</td></tr>";
+  card += "<tr><td>IP</td><td>" + WiFi.localIP().toString() + "</td></tr>";
+  card += "<tr><td>MAC</td><td>" + WiFi.macAddress() + "</td></tr>";
+  card += "<tr><td>Status</td><td>";
+  if (conectado) card += "<span class='ponto ponto-ok'></span>Conectado";
+  else           card += "<span class='ponto ponto-erro'></span>Desconectado";
+  card += "</td></tr></table></div>";
+  return card;
+}
+
+// Card do atuador: estado atual e botões que chamam a rota /atuador
+String montarCardAtuador() {
+  String card = "<div class='card'><h2>Atuador (buzzer)</h2>";
+  if (atuadorLigado) card += "<span class='tag tag-alerta'>Ligado</span>";
+  else               card += "<span class='tag tag-neutra'>Desligado</span>";
+  card += "<p class='detalhe'>Liga sozinho acima de " + String(LIMITE_TEMPERATURA, 0) + " &deg;C. Desligar silencia o alarme.</p>";
+  card += "<div class='botoes'>";
+  card += "<a class='botao' href='/atuador?estado=on'>Ligar</a>";
+  card += "<a class='botao' href='/atuador?estado=off'>Desligar</a>";
+  card += "</div></div>";
   return card;
 }
 
 void handleRoot() {
   bool conectado = (WiFi.status() == WL_CONNECTED);
 
-  // Montagem da página HTML profissional COM AUTO-REFRESH
-  String html = "<html lang='pt-BR'><head><meta charset='UTF-8'>";
+  String html = "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<meta http-equiv='refresh' content='2'>";  // atualiza a página a cada 2 segundos
+  html += "<title>Monitor de Freezer</title>";
+  html += ESTILO;
+  html += "</head><body>";
 
-  // Atualiza a página a cada 2 segundos
-  html += "<meta http-equiv='refresh' content='2'>";
+  // Cabeçalho: título, status real do Wi-Fi e link para o log
+  html += "<div class='topo'><div><h1>Monitor de Freezer</h1><small>ESP32 &middot; servidor HTTP</small></div><div>";
+  if (conectado) html += "<span class='ponto ponto-ok'></span>Conectado";
+  else           html += "<span class='ponto ponto-erro'></span>Desconectado";
+  html += " &middot; <a href='/log'>Log do sistema</a></div></div>";
 
-  html += "<title>Monitor IoT - Freezers</title>";
-  html += "<style>body{font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;background-color:#eef2f5;color:#333;margin:0;padding:40px;text-align:center;}";
-  html += ".header{margin-bottom:30px;} h1{color:#2c3e50;}";
-  html += ".container{display:flex;justify-content:center;gap:20px;flex-wrap:wrap;}";
-  html += ".card{background:#fff;border-radius:12px;box-shadow:0 4px 8px rgba(0,0,0,0.1);padding:25px;width:240px;border-bottom: 5px solid #28a745;}";
-  html += ".temp{font-size:3em;font-weight:bold;color:#007bff;margin:15px 0;}";
-  html += ".temp-ext{color:#f39c12;}";
-  html += ".minmax{color:#555;font-size:0.95em;}";
-  html += ".badge{color:white;padding:5px 10px;border-radius:20px;font-size:0.8em;}";
-  html += ".badge-ok{background:#28a745;} .badge-erro{background:#dc3545;}";
-  html += ".rede{border-bottom:5px solid #17a2b8;text-align:left;} .rede p{margin:8px 0;}";
-  html += ".ok{color:#28a745;font-weight:bold;} .erro{color:#dc3545;font-weight:bold;}";
-  html += ".atuador{border-bottom:5px solid #6f42c1;}";
-  html += ".botao{display:inline-block;margin:6px;padding:10px 18px;border-radius:8px;color:#fff;text-decoration:none;font-weight:bold;}";
-  html += ".ligar{background:#28a745;} .desligar{background:#dc3545;}</style></head><body>";
-
-  // Selo de status baseado no estado real do Wi-Fi
-  String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
-                          : "<span class='badge badge-erro'>DESCONECTADO</span>";
-  html += "<div class='header'><h1>&#10052;&#65039; Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
-  html += "<p><a href='/log'>Ver log do sistema</a> | <a href='/status'>Status (JSON)</a></p></div>";
-  html += "<div class='container'>";
-
-  html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1",
-                     minInterna, maxInterna, temRegistroInterna, ultimaValidaInterna);
-  html += montarCard("Temp. Externa", tempExterna, externaOk, "temp-ext", "Sensor DS18B20 #2",
-                     minExterna, maxExterna, temRegistroExterna, ultimaValidaExterna);
-
+  html += "<div class='conteudo'><div class='grade'>";
+  html += montarCard("Temperatura interna", tempInterna, internaOk, "Sensor DS18B20 #1",
+                     minInterna, maxInterna, temRegistroInterna, true);
+  html += montarCard("Temperatura externa", tempExterna, externaOk, "Sensor DS18B20 #2",
+                     minExterna, maxExterna, temRegistroExterna, false);
   html += montarCardRede(conectado);
   html += montarCardAtuador();
-
-  html += "</div></body></html>";
+  html += "</div></div></body></html>";
 
   server.send(200, "text/html", html);
-}
-
-// Card do atuador: estado atual e botões que chamam a rota /atuador
-String montarCardAtuador() {
-  String card = "<div class='card atuador'><h3>Atuador (Buzzer)</h3>";
-  card += "<p><b>Estado:</b> ";
-  if (atuadorLigado) card += "<span class='erro'>&#9679; LIGADO</span>";
-  else               card += "<span class='ok'>&#9679; DESLIGADO</span>";
-  card += "</p>";
-  card += "<a class='botao ligar' href='/atuador?estado=on'>Ligar</a>";
-  card += "<a class='botao desligar' href='/atuador?estado=off'>Desligar</a>";
-  card += "</div>";
-  return card;
 }
 
 // Rota /atuador?estado=on|off: recebe o comando pela rede
@@ -415,9 +444,9 @@ void handleAtuador() {
   String estado = server.arg("estado");  // valor depois de "estado=" na URL
 
   if (estado == "on") {
-    definirAtuador(true);
+    definirAtuador(true, "via rede");
   } else if (estado == "off") {
-    definirAtuador(false);
+    definirAtuador(false, "via rede");  // também serve para silenciar o alarme
   } else {
     // Comando inválido: responde erro 400 e não muda nada
     registrarLog("AVISO", "Comando invalido em /atuador: '" + estado + "'");
@@ -432,55 +461,19 @@ void handleAtuador() {
 
 // Rota /log: mostra o log gravado na flash (antigo + atual)
 void handleLog() {
-  String html = "<html lang='pt-BR'><head><meta charset='UTF-8'><title>Log do Sistema</title>";
-  html += "<style>body{font-family:'Segoe UI', Tahoma, sans-serif;background:#eef2f5;margin:0;padding:30px;}";
-  html += "pre{background:#fff;border-radius:8px;padding:15px;box-shadow:0 2px 6px rgba(0,0,0,0.1);white-space:pre-wrap;}</style></head><body>";
-  html += "<h2>Log do Sistema</h2><p><a href='/'>&larr; Voltar ao painel</a></p>";
+  String html = "<!DOCTYPE html><html lang='pt-BR'><head><meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Log do Sistema</title>";
+  html += ESTILO;
+  html += "</head><body>";
+  html += "<div class='topo'><div><h1>Log do sistema</h1><small>Gravado na flash (LittleFS)</small></div>";
+  html += "<div><a href='/'>Voltar ao painel</a></div></div>";
+  html += "<div class='conteudo'>";
   if (!logDisponivel) {
     html += "<p>Sistema de arquivos indispon&iacute;vel.</p>";
   }
-  html += "<pre>" + lerArquivo(ARQUIVO_LOG_ANTIGO) + lerArquivo(ARQUIVO_LOG) + "</pre></body></html>";
+  html += "<pre>" + lerArquivo(ARQUIVO_LOG_ANTIGO) + lerArquivo(ARQUIVO_LOG) + "</pre></div></body></html>";
   server.send(200, "text/html", html);
-}
-
-// Número em JSON, ou null quando não há valor válido
-String jsonNumero(bool valido, float valor) {
-  return valido ? String(valor, 2) : String("null");
-}
-
-// Objeto JSON com o estado de um sensor
-String jsonSensor(bool ok, float temp, bool temRegistro, float minimo, float maximo,
-                  int falhas, bool emAlerta) {
-  String json = "{";
-  json += "\"ok\":" + String(ok ? "true" : "false");
-  json += ",\"temperatura\":" + jsonNumero(ok, temp);
-  json += ",\"minima\":" + jsonNumero(temRegistro, minimo);
-  json += ",\"maxima\":" + jsonNumero(temRegistro, maximo);
-  json += ",\"falhas_seguidas\":" + String(falhas);
-  json += ",\"alerta\":" + String(emAlerta ? "true" : "false");
-  json += "}";
-  return json;
-}
-
-// Rota /status: estado completo do sistema em JSON (para testes e integrações)
-void handleStatus() {
-  String json = "{";
-  json += "\"data_hora\":\"" + dataHora() + "\"";
-  json += ",\"uptime_s\":" + String(millis() / 1000);
-  json += ",\"hora_sincronizada\":" + String(horaSincronizada ? "true" : "false");
-  json += ",\"limite_temperatura\":" + String(LIMITE_TEMPERATURA, 1);
-  json += ",\"interna\":" + jsonSensor(internaOk, tempInterna, temRegistroInterna,
-                                       minInterna, maxInterna, falhasInterna, alertaInterna);
-  json += ",\"externa\":" + jsonSensor(externaOk, tempExterna, temRegistroExterna,
-                                       minExterna, maxExterna, falhasExterna, alertaExterna);
-  json += ",\"wifi\":{\"conectado\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
-  json += ",\"ssid\":\"" + WiFi.SSID() + "\"";
-  json += ",\"ip\":\"" + WiFi.localIP().toString() + "\"";
-  json += ",\"rssi\":" + String(WiFi.RSSI()) + "}";
-  json += ",\"atuador_ligado\":" + String(atuadorLigado ? "true" : "false");
-  json += ",\"log_disponivel\":" + String(logDisponivel ? "true" : "false");
-  json += "}";
-  server.send(200, "application/json", json);
 }
 
 void setup() {
@@ -507,22 +500,17 @@ void setup() {
     registrarLog("AVISO", "Esperados 2 sensores, encontrados " + String(quantidade));
   }
 
-  // Lista o endereço de cada sensor encontrado
-  for (int i = 0; i < quantidade; i++) {
-    DeviceAddress endereco;
-    if (sensors.getAddress(endereco, i)) {
-      Serial.print("  Sensor ");
-      Serial.print(i);
-      Serial.print(": ");
-      imprimirEndereco(endereco);
-    }
+  // Guarda o endereço dos sensores: 1º do barramento = interno, 2º = externo.
+  // Se um sensor não for encontrado, o endereço é zerado: o card mostra FALHA
+  // (sem isso, a biblioteca deixaria o endereço do outro sensor e os dois cards
+  // mostrariam a mesma temperatura).
+  if (!sensors.getAddress(enderecoInterno, 0)) {
+    memset(enderecoInterno, 0, sizeof(enderecoInterno));
+    registrarLog("ERRO", "Sensor interno nao encontrado ao iniciar");
   }
-
-  // Se os endereços não foram preenchidos, usa a ordem do barramento
-  if (enderecoVazio(enderecoInterno) || enderecoVazio(enderecoExterno)) {
-    Serial.println("AVISO: enderecos nao configurados. Usando ordem do barramento.");
-    sensors.getAddress(enderecoInterno, 0);
-    sensors.getAddress(enderecoExterno, 1);
+  if (!sensors.getAddress(enderecoExterno, 1)) {
+    memset(enderecoExterno, 0, sizeof(enderecoExterno));
+    registrarLog("ERRO", "Sensor externo nao encontrado ao iniciar");
   }
 
   // Inicializa I2C e Display OLED
@@ -548,7 +536,6 @@ void setup() {
   server.on("/", handleRoot);
   server.on("/log", handleLog);
   server.on("/atuador", handleAtuador);
-  server.on("/status", handleStatus);
   server.begin();
 
   // Primeira leitura imediata
