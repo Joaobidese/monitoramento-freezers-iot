@@ -108,9 +108,13 @@ Os testes de ping, porta, HTTP, sensores, atuador, reconexão do Wi-Fi, NTP, est
 
 ## Screenshots
 
-**Painel web** – à esquerda, sensor interno aquecido (o máximo sobe); à direita, sensor desconectado (FALHA):
+**Painel web – situação normal:** sensor interno no gelo (6,5 °C, abaixo do limite de 7 °C), sensor externo no ambiente e buzzer desligado:
 
-![Painel](docs/testes/04_sensores.png)
+![Painel normal](docs/painel_normal.png)
+
+**Painel web – alerta:** sensor interno fora do gelo (16,8 °C, acima de 7 °C); o buzzer ligou automaticamente:
+
+![Painel em alerta](docs/painel_alerta.png)
 
 **Log do sistema** (rota `/log`), com data e hora via NTP, comandos do atuador e a queda e reconexão do Wi-Fi:
 
@@ -119,3 +123,7 @@ Os testes de ping, porta, HTTP, sensores, atuador, reconexão do Wi-Fi, NTP, est
 **Comandos ao atuador** pela rede (303 para comandos válidos, 400 para inválido):
 
 ![Atuador](docs/testes/05_atuador.png)
+
+**Alerta no Telegram:** mensagens enviadas pelo ESP32 ao grupo da equipe quando a temperatura passa do limite e quando normaliza:
+
+![Telegram](docs/testes/09_telegram.jpg)
