@@ -6,6 +6,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <LittleFS.h>
+#include <time.h>
 
 // Credenciais da rede Wi-Fi
 const char* ssid = "Wifi";
@@ -51,6 +52,18 @@ bool externaOk = false;
 
 // Limite de temperatura do freezer: acima disso é alerta
 const float LIMITE_TEMPERATURA = -10.0;
+
+// Data e hora via NTP (horário de Brasília, UTC-3, sem horário de verão)
+const char* FUSO_HORARIO = "<-03>3";
+const char* SERVIDOR_NTP_1 = "pool.ntp.org";
+const char* SERVIDOR_NTP_2 = "a.st1.ntp.br";
+bool horaSincronizada = false;
+
+// Reconexão do Wi-Fi
+const unsigned long INTERVALO_RECONEXAO_MS = 10000;  // tenta reconectar a cada 10 s
+bool wifiConectado = false;          // estado na última verificação
+unsigned long inicioQueda = 0;       // quando a conexão caiu
+unsigned long ultimaTentativa = 0;   // última tentativa de reconexão
 bool alertaInterna = false;  // true = temperatura está acima do limite
 bool alertaExterna = false;
 
@@ -99,8 +112,17 @@ bool lerSensor(const DeviceAddress endereco, float &temperatura) {
   return true;
 }
 
-// Horário do registro: tempo desde que o sistema ligou (+hh:mm:ss)
+// Horário do registro: data e hora reais (NTP) ou, sem internet,
+// o tempo desde que o sistema ligou (+hh:mm:ss)
 String dataHora() {
+  time_t agora = time(nullptr);           // segundos desde 01/01/1970
+  if (agora > 1700000000) {               // relógio já foi acertado pelo NTP
+    struct tm local;
+    localtime_r(&agora, &local);          // converte para o fuso configurado
+    char texto[24];
+    strftime(texto, sizeof(texto), "%d/%m/%Y %H:%M:%S", &local);
+    return String(texto);
+  }
   unsigned long s = millis() / 1000;
   char texto[16];
   snprintf(texto, sizeof(texto), "+%02lu:%02lu:%02lu", s / 3600, (s / 60) % 60, s % 60);
@@ -310,7 +332,7 @@ void handleRoot() {
   // Selo de status baseado no estado real do Wi-Fi
   String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
                           : "<span class='badge badge-erro'>DESCONECTADO</span>";
-  html += "<div class='header'><h1>❄️ Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
+  html += "<div class='header'><h1> Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
   html += "<p><a href='/log'>Ver log do sistema</a></p></div>";
   html += "<div class='container'>";
 
@@ -430,6 +452,10 @@ void setup() {
 
   Serial.println();
   registrarLog("INFO", "Wi-Fi conectado. IP " + WiFi.localIP().toString());
+  wifiConectado = true;
+
+  // Pede a hora aos servidores NTP (a resposta chega em segundo plano)
+  configTzTime(FUSO_HORARIO, SERVIDOR_NTP_1, SERVIDOR_NTP_2);
 
   server.on("/", handleRoot);
   server.on("/log", handleLog);
@@ -440,7 +466,45 @@ void setup() {
   ultimaLeitura = millis() - INTERVALO_LEITURA_MS;
 }
 
+// Registra no log quando o relógio é acertado pelo NTP (uma vez)
+void verificarHora() {
+  if (!horaSincronizada && time(nullptr) > 1700000000) {
+    horaSincronizada = true;
+    registrarLog("INFO", "Data e hora sincronizadas via NTP");
+  }
+}
+
+// Detecta queda do Wi-Fi, tenta reconectar a cada 10 s e registra no log
+void verificarWiFi() {
+  bool conectadoAgora = (WiFi.status() == WL_CONNECTED);
+  unsigned long agora = millis();
+
+  // Acabou de cair
+  if (wifiConectado && !conectadoAgora) {
+    wifiConectado = false;
+    inicioQueda = agora;
+    ultimaTentativa = agora;
+    registrarLog("ERRO", "Wi-Fi desconectado");
+  }
+
+  // Acabou de voltar
+  if (!wifiConectado && conectadoAgora) {
+    wifiConectado = true;
+    unsigned long segundosFora = (agora - inicioQueda) / 1000;
+    registrarLog("INFO", "Wi-Fi reconectado apos " + String(segundosFora) + " s. IP " + WiFi.localIP().toString());
+  }
+
+  // Continua fora: nova tentativa a cada 10 s (sem travar o loop)
+  if (!conectadoAgora && agora - ultimaTentativa >= INTERVALO_RECONEXAO_MS) {
+    ultimaTentativa = agora;
+    Serial.println("Tentando reconectar ao Wi-Fi...");
+    WiFi.reconnect();
+  }
+}
+
 void loop() {
   server.handleClient();
   atualizarSensores();
+  verificarWiFi();
+  verificarHora();
 }
