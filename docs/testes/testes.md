@@ -15,6 +15,8 @@ regulamento (falha de conexão e estresse).
 | Cliente | Notebook conectado à mesma rede, Windows (PowerShell / Prompt de Comando) |
 
 > Os prints de cada teste ficam nesta mesma pasta (`docs/testes/`). Testes realizados em 10/11/2026.
+>
+> **Versões do firmware:** os testes 1 a 8 foram feitos com a versão anterior do painel web (layout antigo e limite de alerta aplicado aos dois sensores). Depois deles, o painel foi redesenhado, o limite passou a valer só para o sensor interno (7 °C na demonstração) e foram adicionados o alarme automático e o Telegram. As funções verificadas nos testes 1 a 8 (rede, HTTP, leitura, mínimo/máximo, falha de sensor, atuador, log, NTP, reconexão e estresse) não mudaram de comportamento. O teste 9 foi feito com a versão final; o painel final aparece no README.
 
 ## Resumo
 
