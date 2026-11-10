@@ -332,7 +332,7 @@ void handleRoot() {
   // Selo de status baseado no estado real do Wi-Fi
   String selo = conectado ? "<span class='badge badge-ok'>CONECTADO</span>"
                           : "<span class='badge badge-erro'>DESCONECTADO</span>";
-  html += "<div class='header'><h1> Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
+  html += "<div class='header'><h1>&#10052;&#65039; Painel de Monitoramento IoT</h1><p>ESP32 Servidor Embarcado " + selo + "</p>";
   html += "<p><a href='/log'>Ver log do sistema</a></p></div>";
   html += "<div class='container'>";
 
