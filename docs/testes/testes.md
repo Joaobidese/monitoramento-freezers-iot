@@ -28,6 +28,7 @@ regulamento (falha de conexão e estresse).
 | 6 | Queda e reconexão do Wi-Fi | Enunciado 3.2.1 / Etapa 3 | ✅ Reconectou em 74 s |
 | 7 | Data e hora via NTP | Enunciado 3.2.1 e 3.2.3 | ✅ Sincronizado |
 | 8 | Estresse (50 requisições) | Etapa 3 | ✅ 50/50, média 35,3 ms |
+| 9 | Alarme automático e alerta no Telegram | Atuador e comunicação de saída (HTTPS) | ✅ Buzzer liga acima de 7 °C e mensagem chega ao grupo |
 
 ---
 
@@ -197,3 +198,29 @@ Serial que não aparece `rst:` no meio do teste).
 | Tempo total | ~1,8 s |
 
 ![Estresse](08_estresse.png)
+
+---
+
+## 9. Alarme automático e alerta no Telegram
+
+Verifica a regra de alerta do sensor interno (limite de **7 °C** na demonstração): acima do limite, o
+buzzer liga sozinho e o ESP32 envia uma mensagem ao grupo da equipe no Telegram (requisição HTTPS à API
+do Telegram); ao voltar abaixo do limite, o buzzer desliga e uma nova mensagem é enviada. O botão
+**Desligar** do painel silencia o alarme.
+
+1. Colocar o sensor interno em um copo com gelo (~2 °C) até o painel mostrar **Normal**.
+2. Retirar o sensor do gelo e aguardar a temperatura passar de 7 °C.
+3. Clicar em **Desligar** no painel para silenciar.
+4. Recolocar o sensor no gelo.
+
+**Esperado:** no log, `AVISO Temp. interna acima do limite`, `Atuador LIGADO por alerta` e
+`Alerta enviado ao Telegram`; no grupo do Telegram, as mensagens de ALERTA e de Normalizado.
+
+**Resultado:** ✅ OK – ao passar do limite (11,8 °C no teste do log), o buzzer ligou sozinho, o log
+registrou `Atuador LIGADO por alerta` e `Alerta enviado ao Telegram`, e o clique em **Desligar**
+silenciou o alarme (`Atuador DESLIGADO via rede`). No Telegram chegaram dois ciclos completos de alerta e
+normalização (7,6 °C → 6,6 °C e 7,4 °C → 6,7 °C).
+
+![Log do alarme](09_alarme_log.png)
+
+![Mensagens no Telegram](09_telegram.jpg)
