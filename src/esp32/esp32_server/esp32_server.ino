@@ -59,6 +59,15 @@ const char* SERVIDOR_NTP_1 = "pool.ntp.org";
 const char* SERVIDOR_NTP_2 = "a.st1.ntp.br";
 bool horaSincronizada = false;
 
+// Antes do NTP o relógio do ESP32 começa em 01/01/1970. Qualquer valor
+// acima deste (14/11/2023) indica que a hora já foi acertada.
+const time_t EPOCH_MINIMO_VALIDO = 1700000000;
+
+// Retorna true se o relógio já foi acertado pelo NTP
+bool relogioValido() {
+  return time(nullptr) > EPOCH_MINIMO_VALIDO;
+}
+
 // Reconexão do Wi-Fi
 const unsigned long INTERVALO_RECONEXAO_MS = 10000;  // tenta reconectar a cada 10 s
 bool wifiConectado = false;          // estado na última verificação
@@ -115,8 +124,8 @@ bool lerSensor(const DeviceAddress endereco, float &temperatura) {
 // Horário do registro: data e hora reais (NTP) ou, sem internet,
 // o tempo desde que o sistema ligou (+hh:mm:ss)
 String dataHora() {
-  time_t agora = time(nullptr);           // segundos desde 01/01/1970
-  if (agora > 1700000000) {               // relógio já foi acertado pelo NTP
+  if (relogioValido()) {
+    time_t agora = time(nullptr);         // segundos desde 01/01/1970
     struct tm local;
     localtime_r(&agora, &local);          // converte para o fuso configurado
     char texto[24];
@@ -468,7 +477,7 @@ void setup() {
 
 // Registra no log quando o relógio é acertado pelo NTP (uma vez)
 void verificarHora() {
-  if (!horaSincronizada && time(nullptr) > 1700000000) {
+  if (!horaSincronizada && relogioValido()) {
     horaSincronizada = true;
     registrarLog("INFO", "Data e hora sincronizadas via NTP");
   }
