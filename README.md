@@ -2,6 +2,12 @@
 
 Telemetria térmica contínua de freezers: um ESP32 mede a temperatura interna e externa, mostra os valores em um display OLED e em um painel web, grava um log persistente, emite alertas visuais e sonoros (buzzer) quando a temperatura interna passa do limite e permite controlar o buzzer pela rede, para evitar a perda de insumos.
 
+## Vídeo demonstrativo
+
+[![Vídeo demonstrativo do sistema](https://img.youtube.com/vi/c5UZHnBwua4/hqdefault.jpg)](https://youtube.com/shorts/c5UZHnBwua4)
+
+Clique na imagem para assistir à demonstração no YouTube.
+
 ## Integrantes da Equipe (Grupo 4)
 
 | Nome | RA |
@@ -91,7 +97,7 @@ curl -i "http://<IP_DO_ESP32>/atuador?estado=off"
    - OneWire
    - DallasTemperature
 
-   (`WiFi`, `WebServer` e `LittleFS` já vêm com o pacote do ESP32.)
+   (`WiFi`, `WebServer`, `LittleFS`, `WiFiClientSecure` e `HTTPClient` já vêm com o pacote do ESP32.)
 3. Na pasta `src/esp32/esp32_server/`, copie `config.example.h` para `config.h` e preencha o nome e a senha da rede Wi-Fi (o ESP32 só conecta em redes de 2,4 GHz). O `config.h` está no `.gitignore` e não vai para o repositório.
    - **Telegram (opcional):** crie um bot com o @BotFather e preencha `TELEGRAM_TOKEN` no `config.h`. Adicione o bot a um grupo, envie `/start@nome_do_bot` no grupo e abra `https://api.telegram.org/bot<TOKEN>/getUpdates` para obter o `chat.id` (número negativo); preencha `TELEGRAM_CHAT_ID`. Com `SEU_CHAT_ID`, o sistema funciona normalmente, só sem as mensagens.
 4. Abra `src/esp32/esp32_server/esp32_server.ino`, selecione a placa **ESP32 Dev Module** e a porta correta, e clique em **Carregar**.
@@ -100,7 +106,7 @@ curl -i "http://<IP_DO_ESP32>/atuador?estado=off"
 
 ### Identificação dos sensores
 
-Ao ligar, o ESP32 guarda o endereço de cada DS18B20: o primeiro encontrado no barramento é o **interno** e o segundo, o **externo**. Essa ordem é definida pelo endereço de fábrica dos sensores e não muda sozinha. Para conferir na montagem, aqueça com a mão o sensor que vai dentro do freezer: deve subir o card **Temp. Interna**.
+Ao ligar, o ESP32 guarda o endereço de cada DS18B20: o primeiro encontrado no barramento é o **interno** e o segundo, o **externo**. Essa ordem é definida pelo endereço de fábrica dos sensores e não muda sozinha. Para conferir na montagem, aqueça com a mão o sensor que vai dentro do freezer: deve subir o card **Temperatura interna**.
 
 ## Testes
 
