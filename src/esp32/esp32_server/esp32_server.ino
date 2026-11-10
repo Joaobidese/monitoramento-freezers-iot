@@ -58,6 +58,14 @@ float tempExterna = 0.0;
 bool internaOk = false;   // false = sensor desconectado ou com falha
 bool externaOk = false;
 
+// Falha persistente: N leituras seguidas sem resposta (5 x 2 s = ~10 s)
+// separa um ruído isolado no barramento de um sensor realmente com defeito
+const int FALHAS_PARA_ALERTA = 5;
+int falhasInterna = 0;                 // leituras seguidas com falha
+int falhasExterna = 0;
+unsigned long ultimaValidaInterna = 0; // millis() da última leitura válida
+unsigned long ultimaValidaExterna = 0;
+
 // Limite de temperatura do freezer: acima disso é alerta
 const float LIMITE_TEMPERATURA = -10.0;
 
@@ -219,6 +227,20 @@ void atualizarMinMax(float temp, float &minimo, float &maximo, bool &temRegistro
   if (temp > maximo) maximo = temp;
 }
 
+// Conta leituras seguidas com falha e avisa uma vez quando vira falha persistente
+void acompanharFalhas(const char* nome, bool ok, int &falhas, unsigned long &ultimaValida) {
+  if (ok) {
+    falhas = 0;
+    ultimaValida = millis();
+    return;
+  }
+  falhas++;
+  if (falhas == FALHAS_PARA_ALERTA) {
+    registrarLog("ERRO", "Sensor " + String(nome) + " sem leitura valida ha " +
+                 String(FALHAS_PARA_ALERTA) + " leituras seguidas");
+  }
+}
+
 // Pede a medição e, após o tempo de conversão, busca o resultado
 void atualizarSensores() {
   unsigned long agora = millis();
@@ -239,6 +261,9 @@ void atualizarSensores() {
 
     internaOk = lerSensor(enderecoInterno, tempInterna);
     externaOk = lerSensor(enderecoExterno, tempExterna);
+
+    acompanharFalhas("interno", internaOk, falhasInterna, ultimaValidaInterna);
+    acompanharFalhas("externo", externaOk, falhasExterna, ultimaValidaExterna);
 
     // Leituras com falha não entram no mínimo e no máximo
     if (internaOk) atualizarMinMax(tempInterna, minInterna, maxInterna, temRegistroInterna);
@@ -287,7 +312,7 @@ void atualizarDisplay() {
 
 // Card de temperatura: borda vermelha acima de -10 °C ou em falha
 String montarCard(const char* titulo, float temp, bool ok, const char* classeTemp, const char* legenda,
-                  float minimo, float maximo, bool temRegistro) {
+                  float minimo, float maximo, bool temRegistro, unsigned long ultimaValida) {
   bool alerta = !ok || temp > LIMITE_TEMPERATURA;
   String borda = alerta ? "border-bottom: 5px solid #dc3545;" : "border-bottom: 5px solid #28a745;";
   String valor;
@@ -304,6 +329,12 @@ String montarCard(const char* titulo, float temp, bool ok, const char* classeTem
     textoMax = String(maximo, 1) + " &deg;C";
   }
   card += "<p class='minmax'>M&iacute;n: <b>" + textoMin + "</b> | M&aacute;x: <b>" + textoMax + "</b></p>";
+
+  // Em falha, mostra há quanto tempo o sensor não responde
+  if (!ok && temRegistro) {
+    unsigned long segundos = (millis() - ultimaValida) / 1000;
+    card += "<p class='erro'>Sem leitura h&aacute; " + String(segundos) + " s</p>";
+  }
 
   card += "<p>" + String(legenda) + "</p></div>";
   return card;
@@ -354,9 +385,9 @@ void handleRoot() {
   html += "<div class='container'>";
 
   html += montarCard("Temp. Interna", tempInterna, internaOk, "", "Sensor DS18B20 #1",
-                     minInterna, maxInterna, temRegistroInterna);
+                     minInterna, maxInterna, temRegistroInterna, ultimaValidaInterna);
   html += montarCard("Temp. Externa", tempExterna, externaOk, "temp-ext", "Sensor DS18B20 #2",
-                     minExterna, maxExterna, temRegistroExterna);
+                     minExterna, maxExterna, temRegistroExterna, ultimaValidaExterna);
 
   html += montarCardRede(conectado);
   html += montarCardAtuador();
